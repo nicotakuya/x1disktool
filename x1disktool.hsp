@@ -1,0 +1,834 @@
+// X1 HuBASIC DISK IMAGE(2D) TOOL by takuya matsubara
+screen 0,1200,640
+appname ="X1 HuBASIC DISK IMAGE(2D) TOOL"
+title appname
+font "ＭＳ ゴシック",14
+
+#define FILEMAX 128				// max file
+#define IMAGESIZE (1024*320)	// バイト数/ディスク
+#define RECORDSIZE	256			// バイト数/レコード
+#define CLUSTERSIZE	(RECORDSIZE*16)		// バイト数/クラスタ
+#define DIRENT (16*RECORDSIZE)	// ディレクトリエントリのアドレス(0x1000)
+#define FAT (14*RECORDSIZE)		// FATのアドレス(0xE00)
+#define CLUSTERMAX (IMAGESIZE/CLUSTERSIZE)	// 最大クラスタ数
+
+sdim diskimage,IMAGESIZE	//ディスクイメージ
+sdim tempbuf,65536			//テンポラリ
+sdim tempbuf2,65536			//テンポラリ
+sdim filename,15,FILEMAX	//ファイル名
+dim stcl,FILEMAX		//クラスタ
+dim filesize,FILEMAX	//サイズ
+dim attrib,FILEMAX		//属性
+dim adr1,FILEMAX
+dim adr2,FILEMAX
+sdim chrtable,10,256
+sdim crlf,3
+
+poke crlf,0,13	// CR
+poke crlf,1,10	// LF
+poke crlf,2,0	// NULL
+
+gosub *gettable
+
+buffer 1,256,256
+gsel 1
+picload "x1font.png"
+gsel 0
+
+listidx=0
+objsize 300,100,60
+pos 8,8
+listbox listidx,100,""    // ID=0
+
+objsize 150,24
+x=320
+y=8
+pos x,y
+button gosub "LOAD 2D file",*load2d
+y=y+30
+
+pos x,y
+button gosub "SAVE 2D file",*save2d
+y=y+30
+
+pos x,y
+button gosub "ADD TEXT",*addfile
+y=y+30
+
+pos x,y
+button gosub "EXPORT TEXT",*exportfile
+y=y+30
+
+pos x,y
+button gosub "DELETE FILE",*killfile
+y=y+30
+
+pos x,y
+button gosub "VIEW",*viewfile
+
+stop
+end
+//-----
+*clrwin
+x=8
+y=220
+color 255,255,240
+boxf x,y,1200,640
+color 0,0,0
+pos x,y
+return
+//-----open 2D file
+*load2d
+dialog "2D",16
+if (stat==0):end
+bload refstr,diskimage
+title appname+" '"+refstr+"'"
+
+gosub *updatelist
+gosub *viewfat
+return
+//-----
+*updatelist
+for i,0,FILEMAX
+	filename(i) = ""
+	filesize(i) = 0
+	stcl(i) = 0
+	attrib(i) = 0
+next
+
+idx = 0
+for i,0,FILEMAX
+	fseek = DIRENT + (32*i)	// directory entry
+	atr = peek(diskimage,fseek+0) 
+	if (atr == 0x00)or(atr == 0xff) :_continue	//空き
+
+	// filename 名前13 . 拡張子3
+	tempstr = ""
+	for j,1,13
+		c = peek(diskimage,fseek+j)
+		tempstr += strf("%c",c)
+	next
+	repeat	//空白削除
+		if( strmid(tempstr,strlen(tempstr)-1,1)!=" ") :break
+		tempstr = strmid(tempstr,0,strlen(tempstr)-1)
+	loop
+			
+	tempstr += "."
+	tempstr += strf("%c",peek(diskimage,fseek+14))
+	tempstr += strf("%c",peek(diskimage,fseek+15))
+	tempstr += strf("%c",peek(diskimage,fseek+16))
+	repeat	//空白削除
+		if( strmid(tempstr,strlen(tempstr)-1,1)!=" ") :break
+		tempstr = strmid(tempstr,0,strlen(tempstr)-1)
+	loop
+
+	fsize = peek(diskimage,fseek+18) 		//file size(下位)
+	fsize += peek(diskimage,fseek+19)<< 8 	//file size(上位)
+	//ファイルサイズは65536まで？
+	
+	cl = peek(diskimage,fseek+30) 			//クラスタ
+	adr1(idx) = peek(diskimage,fseek+20)+(peek(diskimage,fseek+21)*256)
+	adr2(idx) = peek(diskimage,fseek+22)+(peek(diskimage,fseek+23)*256)
+
+	filename(idx) = tempstr
+	filesize(idx) = fsize	//サイズ
+	stcl(idx) = cl			//クラスタ
+	attrib(idx) = atr 		//属性
+	idx++
+next
+
+tempstr=""
+for i,0,FILEMAX
+	if (filename(i)=="") :_break
+	tempstr += filename(i)+" ("
+	atr = attrib(i) 
+	if (atr and (1<<0)):tempstr+="BIN"
+	if (atr and (1<<1)):tempstr+="BAS"
+	if (atr and (1<<2)):tempstr+="ASC"
+//	tempstr += "/"+strf("%X",adr1(i))+""
+//	tempstr += "/"+strf("%X",adr2(i))+""
+	tempstr += "/"+strf("CL=%X",stcl(i))+""
+	tempstr += "/"+strf("%d",filesize(i))+"Bytes)\n"
+next
+objprm 0,tempstr
+return
+//-----
+*save2d
+dialog "2D",17,"2D file"
+if (stat==0) :return
+bsave refstr,diskimage,IMAGESIZE
+return
+//-----add text file
+*addfile
+dialog "*",16,"ファイル"
+if( stat==0):return
+newfilename = refstr
+
+bload newfilename,tempbuf
+fsize = strsize
+
+j = strlen(newfilename)-1	//パスを除外
+while j>0
+	if (peek(newfilename,j-1)==$5C):_break	//'\'検出
+	j--
+wend
+newfilename = strmid(newfilename,j,99)
+
+gosub *sjis2asc
+
+c = peek(tempbuf,fsize-1)	//最後に0x1A(EOF)が無い場合は追加
+if (c != $1A){
+	tempbuf += strf("%c",$1A)
+	fsize++
+}
+
+dialog "add '"+newfilename+"' to 2D file",2
+if( stat==7):return
+
+for i,0,FILEMAX		// search directory entry
+	fseek = DIRENT + (32*i)
+	atr = peek(diskimage,fseek+0)
+	if (atr == 0x00)or(atr == 0xFF):_break	//空きを発見
+next
+if (i >= FILEMAX){
+	dialog "ERROR:empty directory entry."
+	return	//検索失敗
+}
+
+for cl,0,CLUSTERMAX	//search FAT
+	if (peek(diskimage,FAT+cl) == 0x00) :_break	//空きを発見
+next
+if (cl >= CLUSTERMAX){
+	dialog "ERROR:empty CLUSTER"
+	return	//検索失敗
+}
+poke diskimage,FAT+cl,$8F	//FATに終了クラスタ(暫定)を埋めておく
+
+atr = (1<<2)
+poke diskimage,fseek+0,atr 			//属性
+
+//poke diskimage,fseek+18,fsize & $ff 	//ファイルサイズ(下位)
+//poke diskimage,fseek+19,fsize >> 8 		//ファイルサイズ(上位)
+poke diskimage,fseek+18,0	 	//ファイルサイズ(下位)
+poke diskimage,fseek+19,0 		//ファイルサイズ(上位)
+
+poke diskimage,fseek+20,0
+poke diskimage,fseek+21,0
+
+poke diskimage,fseek+22,0
+poke diskimage,fseek+23,0
+
+poke diskimage,fseek+29,0 		//
+poke diskimage,fseek+30,cl 		//CLUSTER
+poke diskimage,fseek+31,0 		//
+
+// ファイル名
+for j,1,16
+	poke diskimage,fseek+j,$20	//空白で埋める
+next
+
+j=1
+for i,0,strlen(newfilename)
+	c = peek(newfilename,i)
+	if (c==$2e){	// '.'を検出
+		j=14
+		_continue
+	}
+	poke diskimage,fseek+j,c
+	j++
+	if(j>16):_break	//文字数オーバー
+next
+
+lastcluster = 0
+
+p=0
+repeat
+	if( fsize==0):break
+	fseek = CLUSTERSIZE*cl
+
+	for i,0,CLUSTERSIZE	// 1クラスタ書き込み
+		if (fsize==0){
+			poke diskimage,fseek,$00	//ディスクイメージに0書き込み
+			fseek++
+			_continue
+		}
+		c = peek(tempbuf,p)
+		p++
+		poke diskimage,fseek,c	//ディスクイメージに書き込み
+		fseek++
+		fsize--
+//		if (atr and (1<<2)){	//"ASC"
+//			if(c==0x1A){	//EOF
+//				fsize=0
+//			}
+//		}
+		if(lastcluster == 0){
+			if (fsize==0){
+				lastcluster = int(i/256)+$80
+			}		
+		}
+	next
+	if (fsize>0){	//データに続きがある場合
+		for cl_next,0,CLUSTERMAX	//FATを検索
+			if (peek(diskimage,FAT+cl_next) == 0x00) :_break	//空きクラスタを発見
+		next
+		if (cl_next >= CLUSTERMAX){
+			dialog "empty CLUSTER"
+			return
+		}
+		poke diskimage,FAT+cl,cl_next	//next CLUSTER
+		cl = cl_next
+		poke diskimage,FAT+cl,$8F	// FATに終了クラスタ(暫定)を埋めておく
+	}else{
+		if(lastcluster==0):lastcluster=$80
+		poke diskimage,FAT+cl,lastcluster	//last CLUSTER
+	}
+loop
+gosub *updatelist
+gosub *viewfat
+
+return
+//-----
+*exportfile
+gosub *clrwin
+
+tempstr = filename(listidx)	
+if( tempstr==""):return	
+//dialog "'"+tempstr+"'をローカルに保存します",2
+//if( stat==7):return
+
+fsize = filesize(listidx) 
+if(fsize==0):fsize=$ffff
+atr = attrib(listidx) 
+cl = stcl(listidx)	// クラスタ
+p=0
+repeat
+	if (fsize==0):break
+	if (cl >= CLUSTERMAX): break // 
+	fseek = CLUSTERSIZE*cl
+
+	for i,0,CLUSTERSIZE	// 1クラスタ読み込み
+		if (fsize==0):_break
+		c = peek(diskimage,fseek)
+		poke tempbuf,p,c
+		p++
+		fseek++
+		fsize--
+
+		if (atr and (1<<2)){	//"ASC"
+			if(c==0x1A){	//EOF
+				fsize=0
+				_break
+			}
+		}
+	next
+	if (fsize>0){	//データに続きがある場合
+		cl = peek(diskimage,FAT+cl)	// 次のクラスタ
+	}
+loop
+fsize = p
+poke tempbuf,fsize,0	//null
+
+gosub *asc2sjis
+	
+dialog "*",17,"TXTファイル"
+if (stat==0):return
+newfilename = refstr
+bsave newfilename,tempbuf,fsize
+
+return
+//-----
+*killfile
+gosub *clrwin
+
+tempstr = filename(listidx)	
+if(tempstr==""):return	
+dialog "delete '"+tempstr+"'",2
+if( stat==7):return
+
+cl = stcl(listidx)	// クラスタ
+for i,0,FILEMAX		// ディレクトリエントリを検索
+	fseek = DIRENT + (32*i)
+	atr = peek(diskimage,fseek+0) 
+	if(atr == 0x00)or(atr == 0xff) :_continue
+	if(cl == peek(diskimage,fseek+30)):_break		//クラスタ
+next
+if( i>=FILEMAX):return	//検索失敗
+
+poke diskimage,fseek+0,0	// atr消去
+
+repeat
+	cl_next = peek(diskimage,FAT+cl)	// 次のクラスタ
+	poke diskimage,FAT+cl,0	//FAT消去
+	if (cl_next >= $80):break	//最終クラスタ
+	cl = cl_next
+loop
+gosub *updatelist
+gosub *viewfat
+return
+
+//-----
+*viewfile
+gosub *clrwin
+fsize = filesize(listidx) 
+if(fsize==0):fsize=$ffff
+atr = attrib(listidx) 
+cl = stcl(listidx)	// クラスタ
+wid = 32
+x = 8
+y = 220
+repeat
+	if( fsize == 0):break
+	if( cl >= CLUSTERMAX): break // 
+	fseek = CLUSTERSIZE*int(cl)
+
+	for i,0,CLUSTERSIZE	// 1クラスタ読み込み
+		if(fsize==0):_break
+		c = peek(diskimage,fseek)
+		fseek++
+		fsize--
+
+		if (atr and (1<<2)){//"ASC"
+			if(c==0x1A){//EOF
+				fsize=0
+				_break
+			}
+		}
+		if(y < 640){
+			if ((i \ wid)==0){
+				color 0,0,0
+				pos 8,y
+				print strf("%05X",fseek-1)+":"
+			}
+			
+			x = (i \ wid)*19+60
+			pos x,y
+			tempstr = strf("%02X",c)
+			color 0,0,0
+			print tempstr
+			cx = ((i \ wid)*16)+(1200-(wid*16))
+			x1 = (c \ 16)*16
+			y1 = int(c / 16)*16
+			pos cx,y
+			gcopy 1,x1,y1,16,16
+			if(c<32){
+				color 255,0,0
+				x1=cx
+				y1=y
+				bw=15
+				bh=15
+				gosub *boxline
+			}
+		}	
+		if((i \ wid)==(wid-1)){
+			y += 16
+		}
+	next
+	if (fsize > 0){	//データに続きがある場合
+		cl = peek(diskimage,FAT+cl)	// next クラスタ
+	}
+loop
+return
+//----
+*boxline
+line x1,y1,x1,y1+bh-1
+line x1,y1+bh-1,x1+bw-1,y1+bh-1
+line x1+bw-1,y1,x1+bw-1,y1+bh-1
+line x1,y1,x1+bw-1,y1
+return
+
+//-----
+*viewfat
+cx=620
+cy=0
+color 240,255,255
+boxf cx,cy,1200,220
+color 0,0,0
+
+color 0,0,0
+pos cx-130,0
+print "FAT"	
+for i,0,128
+	x = ((i \ 24)*20)+cx
+	y = (int(i/24)*16)+0
+	if ((i \ 24)==0){
+		color 0,0,0
+		pos cx-70,y
+		print strf("%05X",FAT+i)+":"
+	}
+	pos x,y
+	c = peek(diskimage,FAT+i)
+	if(c==0){
+		color 128,128,128
+	}else{
+		if(c < CLUSTERMAX){
+			color 0,0,255
+		}else{
+			color 255,0,0
+		}
+	}
+	print strf("%02X",c)
+next
+
+color 0,0,0
+pos cx-130,110
+print "DIR ENT"	
+for i,0,24*6
+	x = ((i \ 24)*20)+cx
+	y = (int(i/24)*16)+110
+	if ((i \ 24)==0){
+		color 0,0,0
+		pos cx-70,y
+		print strf("%05X",DIRENT+i)+":"
+	}
+	pos x,y
+	c = peek(diskimage,DIRENT+i)
+	color 0,64,0
+	print strf("%02X",c)
+next
+return
+//---- ascii to sjis
+*asc2sjis
+dialog "convert character code (ASCII)→(SJIS)",7
+if (stat==7):return
+	
+tempbuf2=""
+for ptr,0,strlen(tempbuf)
+	c=peek(tempbuf,ptr)
+	if (chrtable(c)==""){
+		tempbuf2 += strf("%c",c) 
+	}else{
+		tempbuf2 += chrtable(c) 
+	}
+next
+tempbuf = tempbuf2
+fsize = strlen(tempbuf)
+return
+
+//---- SJIS to ascii
+*sjis2asc
+dialog "convert character code (SJIS)→(ASCII)",7
+if (stat==7):return
+repeat
+	hit=0
+	for i,0,256
+		keyword = chrtable(i)
+		if (keyword==""):_continue
+		val = instr(tempbuf,0,keyword)
+		if (val < 0):_continue
+		hit = 1
+		left = ""
+		if (val > 0):left = strmid(tempbuf,0,val)
+		right = strmid(tempbuf,val+strlen(keyword),strlen(tempbuf)-val)
+   		tempbuf = left+"★"+strf("%02X",i)+right
+	next
+	if (hit==0):break
+loop
+
+keyword="★"
+ptr=0
+repeat
+	for val,0,strlen(tempbuf)
+		if (peek(keyword,0)==peek(tempbuf,ptr+val)){
+			if (peek(keyword,1)==peek(tempbuf,ptr+val+1)){
+				_break
+			}
+		}
+	next
+	if (val>=strlen(tempbuf)):break
+	left = strmid(tempbuf,0,ptr+val)
+	c = int("$"+strmid(tempbuf,ptr+val+2,2))
+	right = strmid(tempbuf,ptr+val+4,strlen(tempbuf)-(ptr+val+4))
+	tempbuf = left+strf("%c",c)+right
+	ptr = val+1
+loop
+fsize = strlen(tempbuf)
+return
+
+// 変換テーブル
+*gettable
+chrtable($00)="{chr0}"
+chrtable($01)="{chr1}"
+chrtable($02)="{chr2}"
+chrtable($03)="{chr3}"
+chrtable($04)="{chr4}"
+chrtable($05)="{chr5}"
+chrtable($06)="{chr6}"
+chrtable($07)="{chr7}"
+chrtable($08)="{chr8}"
+chrtable($09)="{chr9}"
+chrtable($0a)="{chr10}"
+chrtable($0b)="{chr11}"
+chrtable($0c)="{chr12}"
+chrtable($0d)=crlf
+chrtable($0e)="{chr14}"
+chrtable($0f)="{chr15}"
+
+chrtable($10)="{chr16}"
+chrtable($11)="{chr17}"
+chrtable($12)="{chr18}"
+chrtable($13)="{chr19}"
+chrtable($14)="{chr20}"
+chrtable($15)="{chr21}"
+chrtable($16)="{chr22}"
+chrtable($17)="{chr23}"
+chrtable($18)="{chr24}"
+chrtable($19)="{chr25}"
+chrtable($1a)="{EoF}"
+chrtable($1b)="{chr27}"
+chrtable($1c)="→"
+chrtable($1d)="←"
+chrtable($1e)="↑"
+chrtable($1f)="↓"
+
+/*
+chrtable($20)="　"
+chrtable($21)="！"
+chrtable($22)="”"
+chrtable($23)="＃"
+chrtable($24)="＄"
+chrtable($25)="％"
+chrtable($26)="＆"
+chrtable($27)="’"
+chrtable($28)="（"
+chrtable($29)="）"
+chrtable($2a)="＊"
+chrtable($2b)="＋"
+chrtable($2c)="，"
+chrtable($2d)="－"
+chrtable($2e)="．"
+chrtable($2f)="／"
+
+chrtable($30)="０"
+chrtable($31)="１"
+chrtable($32)="２"
+chrtable($33)="３"
+chrtable($34)="４"
+chrtable($35)="５"
+chrtable($36)="６"
+chrtable($37)="７"
+chrtable($38)="８"
+chrtable($39)="９"
+
+chrtable($41)="Ａ"
+chrtable($42)="Ｂ"
+chrtable($43)="Ｃ"
+chrtable($44)="Ｄ"
+chrtable($45)="Ｅ"
+chrtable($46)="Ｆ"
+chrtable($47)="Ｇ"
+chrtable($48)="Ｈ"
+chrtable($49)="Ｉ"
+chrtable($4a)="Ｊ"
+chrtable($4b)="Ｋ"
+chrtable($4c)="Ｌ"
+chrtable($4d)="Ｍ"
+chrtable($4e)="Ｎ"
+chrtable($4f)="Ｏ"
+
+chrtable($50)="Ｐ"
+chrtable($51)="Ｑ"
+chrtable($52)="Ｒ"
+chrtable($53)="Ｓ"
+chrtable($54)="Ｔ"
+chrtable($55)="Ｕ"
+chrtable($56)="Ｖ"
+chrtable($57)="Ｗ"
+chrtable($58)="Ｘ"
+chrtable($59)="Ｙ"
+chrtable($5a)="Ｚ"
+*/
+
+chrtable($7f)="π"
+
+chrtable($80)="{bh1}"
+chrtable($81)="{bh2}"
+chrtable($82)="{bh3}"
+chrtable($83)="{bh4}"
+chrtable($84)="{bh5}"
+chrtable($85)="{bh6}"
+chrtable($86)="{bh7}"
+chrtable($87)="■"
+chrtable($88)="{bv1}"
+chrtable($89)="{bv2}"
+chrtable($8a)="{bv3}"
+chrtable($8b)="{bv4}"
+chrtable($8c)="{bv5}"
+chrtable($8d)="{bv6}"
+chrtable($8e)="{bv7}"
+chrtable($8f)="／"
+
+chrtable($90)="─"
+chrtable($91)="│"
+chrtable($92)="┴"
+chrtable($93)="┬"
+chrtable($94)="┤"
+chrtable($95)="├"
+chrtable($96)="┼"
+chrtable($97)="┐"
+chrtable($98)="┘"
+chrtable($99)="└"
+chrtable($9a)="┌"
+chrtable($9b)="{円左下}"
+chrtable($9c)="{円右上}"
+chrtable($9d)="{円左上}"
+chrtable($9e)="{円右下}"
+chrtable($9f)="＼"
+
+chrtable($a0)="　"
+chrtable($a1)="。"
+chrtable($a2)="「"
+chrtable($a3)="」"
+chrtable($a4)="、"
+chrtable($a5)="・"
+chrtable($a6)="ヲ"
+chrtable($a7)="ァ"
+chrtable($a8)="ィ"
+chrtable($a9)="ゥ"
+chrtable($aa)="ェ"
+chrtable($ab)="ォ"
+chrtable($ac)="ャ"
+chrtable($ad)="ュ"
+chrtable($ae)="ョ"
+chrtable($af)="ッ"
+
+chrtable($b0)="ー"
+chrtable($b1)="ア"
+chrtable($b2)="イ"
+chrtable($b3)="ウ"
+chrtable($b4)="エ"
+chrtable($b5)="オ"
+chrtable($b6)="カ"
+chrtable($b7)="キ"
+chrtable($b8)="ク"
+chrtable($b9)="ケ"
+chrtable($ba)="コ"
+chrtable($bb)="サ"
+chrtable($bc)="シ"
+chrtable($bd)="ス"
+chrtable($be)="セ"
+chrtable($bf)="ソ"
+
+chrtable($c0)="タ"
+chrtable($c1)="チ"
+chrtable($c2)="ツ"
+chrtable($c3)="テ"
+chrtable($c4)="ト"
+chrtable($c5)="ナ"
+chrtable($c6)="ニ"
+chrtable($c7)="ヌ"
+chrtable($c8)="ネ"
+chrtable($c9)="ノ"
+chrtable($ca)="ハ"
+chrtable($cb)="ヒ"
+chrtable($cc)="フ"
+chrtable($cd)="ヘ"
+chrtable($ce)="ホ"
+chrtable($cf)="マ"
+
+chrtable($d0)="ミ"
+chrtable($d1)="ム"
+chrtable($d2)="メ"
+chrtable($d3)="モ"
+chrtable($d4)="ヤ"
+chrtable($d5)="ユ"
+chrtable($d6)="ヨ"
+chrtable($d7)="ラ"
+chrtable($d8)="リ"
+chrtable($d9)="ル"
+chrtable($da)="レ"
+chrtable($db)="ロ"
+chrtable($dc)="ワ"
+chrtable($dd)="ン"
+chrtable($de)="゛"
+chrtable($df)="゜"
+
+chrtable($e0)="●"
+chrtable($e1)="〇"
+chrtable($e2)="{スペード}"
+chrtable($e3)="{ハート}"
+chrtable($e4)="{ダイヤ}"
+chrtable($e5)="{クローバー}"
+chrtable($e6)="{三角1}"
+chrtable($e7)="{三角2}"
+chrtable($e8)="{×}"
+chrtable($e9)="{四角1}"
+chrtable($ea)="{四角2}"
+chrtable($eb)="{四角3}"
+chrtable($ec)="{四角4}"
+chrtable($ed)="{四角5}"
+chrtable($ee)="{四角6}"
+chrtable($ef)= "□"
+
+chrtable($f0)="{チェック}"
+chrtable($f1)="土"
+chrtable($f2)="金"
+chrtable($f3)="木"
+chrtable($f4)="水"
+chrtable($f5)="火"
+chrtable($f6)="月"
+chrtable($f7)="日"
+chrtable($f8)="時"
+chrtable($f9)="分"
+chrtable($fa)="秒"
+chrtable($fb)="年"
+chrtable($fc)="円"
+chrtable($fd)="人"
+chrtable($fe)="生"
+chrtable($ff)="〒"
+return
+
+//-------
+/*memo
+
+2D(両面倍密度)
+ヘッド数 2
+セクタ番号：1～16
+シリンダ番号：0～39
+1セクタ = 256Bytes
+16×40×2×256Bytes = 327680 = 容量320KBytes
+
+・システム領域：0record
+・FAT領域：14record
+・ディレクトリ領域：16～31record
+・データ領域：32～1279record
+
+1レコード = 256Bytes
+1クラスタ = 16record = 16×256=16*256Bytes = 4KBytes
+ルートディレクトリ 16record,ファイル数 78
+
+ディレクトリ領域
+1file 32Bytes
++0：
+・bit0 = Binファイル
+・bit1 = Basファイル
+・bit2 = Ascファイル
+・bit4 = 表示しない
+・bit5 = read after write
+・bit6 = 書き込み禁止
+・bit7 = 下位ディレクトリ
+
++1～13:ファイル名
++14～16：拡張子
++17：パスワードのパック
++18～19：ファイルのバイト数(bin/bas)
++20～21：メモリアドレス
++22～23：実行アドレス
++24～28：日付
++29～31：ファイル先頭クラスタ
+High/low/middle
+
+FAT領域
+128 Bytesで分割
+
+00～7Fh 下位バイト
+80～FFh 上位バイト
+ファイルがチェーンしているクラスタ02～4Fh
+ファイル終了クラスタ80～8Fh
+
+(参考)
+2HD
+セクター番号：1～26
+シリンダー番号：0～76
+26×77×2×256 Bytes＝1025024 = 1001K Bytes
+*/

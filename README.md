@@ -2,7 +2,7 @@
 
 ## overview
 
-2D file tool.
+2D file tool for HSP3.
 
 supported X1 HuBASIC disk only.
 
